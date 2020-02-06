@@ -1,48 +1,75 @@
+# Fetch ssh host key(s) and store into the local known_hosts file.
+# Note that this makes heavy use of `inventory_hostname` rather than
+# `ansible_hostname` since the latter requires facts to have been gathered,
+# which likely hasn't happened at this point.
+#  => implies LARGE assumption that your hostnames and inventory names match.
 ---
-- import_tasks: known_hosts.yml
-  when:
-    - bootstrap_ssh_key_auto_cache
-  tags:
-    - known_hosts
-
-- name: Determine OS release
-  raw: 'cat /etc/*os-release'
-  register: os
-  when:
-    - bootstrap_python_auto_fallback
-  changed_when: false
-  failed_when: false
-
-# No, non-trivial way to install python3 on older systems, so fallback.
-- name: Select older python for older OSen
+# special var 'ansible_connection' is not saved under 'delegate_to'
+- name: Save connection method
   set_fact:
-    bootstrap_python_version: 'python'
+    known_hosts_ansible_connection: "{{ ansible_connection }}"
+  tags:
+    - always
+
+- block:
+
+    # See defaults/main.yml and README.md for important details
+    - name: Allow blind cache updating
+      set_fact:
+        known_hosts_ssh_key_cache_blindly: true
+      # NOTE: using direct check of run tags, which is slighlty unusual.
+      # Allows other tags to be applied on import of this role.
+      when:
+        - ('cache_blindly' in ansible_run_tags)
+
+    - name: Check for cached SSH host key
+      lineinfile:
+        path: "{{ known_hosts_ssh_key_hosts_file | d(known_hosts_ssh_key_hosts_file_default) }}"
+        regexp: '^{{ inventory_hostname }}(,[0-9.]+)? .*'  # note embedded space
+        state: absent
+      check_mode: yes
+      changed_when: false
+      register: known_hosts_ssh_host_key_cached
+      when:
+        - not known_hosts_ssh_key_cache_blindly
+
+    - name: Collect host IP addresses
+      set_fact:
+        known_hosts_host_ipv4s: "{{ lookup('dig', inventory_hostname, 'qtype=A', wantlist=True)
+                                  | select('match', '[0-9.]+')
+                                  | list }}"
+      when:
+        - known_hosts_ssh_key_cache_ipv4
+
+    - name: Fetch SSH host key
+      set_fact:
+        known_hosts_ssh_host_key: "{{ lookup('pipe',
+                                           'ssh-keyscan'
+                                              + ' -t ' + known_hosts_ssh_key_type
+                                              + ' -p ' + (hostvars[inventory_hostname]['ansible_ssh_port'] | default('22'))
+                                              + ' ' + ( [ inventory_hostname ] + ( known_hosts_host_ipv4s | d([]) ) ) | join(',')
+                                              + ' 2>/dev/null') }}"
+      when:
+        - not ( known_hosts_ssh_host_key_cached['found'] | d(false) )
+      failed_when:
+        - known_hosts_ssh_host_key | d("") | length <= 0
+
+    - name: Update SSH host key cache
+      run_once: true
+      known_hosts:
+        path: "{{ known_hosts_ssh_key_hosts_file | d(omit) }}"
+        host: "{{ item }}"
+        key: "{{ hostvars[item]['known_hosts_ssh_host_key'] | d(omit) }}"
+        state: present
+        hash_host: "{{ known_hosts_ssh_key_hash_hostname }}"
+      with_items: "{{ ansible_play_batch }}"
+      when:
+        - hostvars[item]['known_hosts_ssh_host_key'] is defined
+
+  # BLOCK OPTIONS
+  delegate_to: localhost
+  become: false
   when:
-    - bootstrap_python_auto_fallback
-    - (os | d('')) is regex('CentOS [^ ]+ 6|Debian [^ ]+ 8|Ubuntu 14')
-
-- name: Bootstrap Install Python
-  raw: |
-    command -v {{ bootstrap_python_version }}  \
-    || (test $? -eq 42 && exit 42 \
-                       || command -v apt-get && apt-get -y update \
-                                             && DEBIAN_FRONTEND=noninteractive apt-get install -y {{ bootstrap_python_version }}-minimal \
-                                             && exit 42) \
-    || (test $? -eq 42 && exit 42 \
-                       || command -v yum     && yum -y update \
-                                             && yum install -y {{ bootstrap_python_version }} \
-                                             && exit 42) \
-    || (test $? -eq 42 && exit 42 \
-                       || command -v pkg     && pkg update \
-                                             && pkg install -y {{ bootstrap_python_version }} \
-                                             && exit 42)
-  register: py
-  changed_when: py.rc == 42
-  failed_when: py.rc >= 1 and py.rc != 42
-
-- name: Gathering Facts (post python install)
-  setup:
-    gather_subset: "{{ bootstrap_gather_facts }}"
-  when: ( bootstrap_gather_facts is defined
-            and bootstrap_gather_facts
-            and bootstrap_gather_facts | length > 0 )
+    - known_hosts_ansible_connection in [ 'ssh', 'paramiko' ]
+  tags:
+    - always

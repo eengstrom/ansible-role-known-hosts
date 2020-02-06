@@ -3,8 +3,8 @@ galaxy_info:
   author: Eric Engstrom
   company: n/a
 
-  role_name: bootstrap
-  description: Bootstrap a fresh node to accept subsequent Ansible plays.
+  role_name: known_hosts
+  description: Cache/re-cache ssh host keys into a known_hosts file.
   license: BSD 3-Clause
 
   min_ansible_version: 1.2
@@ -43,8 +43,8 @@ galaxy_info:
         - 11.2
         - 12.0
   galaxy_tags:
-    - bootstrap
-    - python
+    - ssh
+    - known_hosts
     - ansible
 
 dependencies: []
